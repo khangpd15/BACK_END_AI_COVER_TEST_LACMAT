@@ -1,0 +1,23 @@
+name: remicare-cover
+services:
+  cover-test:
+    build: .
+    platform: linux/amd64
+    restart: unless-stopped
+    init: true
+    env_file: .env.docker
+    environment:
+      APP_ENV: production
+      KEEP_ALIVE_ENABLED: "false"
+      ENABLE_LEGACY_SCHEMA_CLEANUP: "false"
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - cover-data:/srv/remicare/data
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+volumes:
+  cover-data:

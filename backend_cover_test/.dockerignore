@@ -1,0 +1,17 @@
+**
+!Dockerfile
+!requirements-docker.txt
+!app/
+!app/**
+!models/
+!models/**
+!docker/
+!docker/**
+**/__pycache__
+**/*.pyc
+**/.env
+**/.env.*
+**/*.csv
+**/*.mp4
+**/*.jpg
+**/*.png

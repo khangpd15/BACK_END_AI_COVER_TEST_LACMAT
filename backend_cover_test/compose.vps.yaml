@@ -1,0 +1,57 @@
+name: remicare-vps
+x-runtime: &runtime
+  restart: unless-stopped
+  init: true
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  logging:
+    driver: json-file
+    options: {max-size: "10m", max-file: "3"}
+services:
+  cover-test:
+    <<: *runtime
+    build: .
+    platform: linux/amd64
+    env_file: .env.docker
+    environment:
+      APP_ENV: production
+      KEEP_ALIVE_ENABLED: "false"
+      ENABLE_LEGACY_SCHEMA_CLEANUP: "false"
+    volumes:
+      - cover-data:/srv/remicare/data
+  hirschberg:
+    <<: *runtime
+    build:
+      context: ${HIRSCHBERG_CONTEXT:-../hirschberg}
+    platform: linux/amd64
+    environment:
+      APP_ENV: production
+      PORT: "10000"
+      REMICARE_FRONTEND_ORIGINS: ${REMICARE_FRONTEND_ORIGINS:?Set frontend origin}
+      KEEP_ALIVE_ENABLED: "false"
+      HIRSCHBERG_CPU_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    volumes:
+      - hirschberg-sessions:/srv/remicare/data/hirschberg/sessions
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      COVER_DOMAIN: ${COVER_DOMAIN:?Set cover API hostname}
+      HIRSCHBERG_DOMAIN: ${HIRSCHBERG_DOMAIN:?Set Hirschberg API hostname}
+      ACME_EMAIL: ${ACME_EMAIL:?Set certificate email}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+volumes:
+  cover-data:
+  hirschberg-sessions:
+  caddy-data:
+  caddy-config:

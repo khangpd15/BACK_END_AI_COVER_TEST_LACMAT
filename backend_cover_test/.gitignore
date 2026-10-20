@@ -1,0 +1,36 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+.venv312/
+ENV/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment variables & secrets
+.env
+.env.local
+*.db
+*.sqlite
+
+# Cover test sessions local storage
+data/cover_test/sessions/*
+!data/cover_test/sessions/.gitkeep
+
+# VPS deployment secrets
+.env.docker
+.env.vps

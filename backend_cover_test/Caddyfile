@@ -1,0 +1,25 @@
+{
+	email {$ACME_EMAIL}
+}
+
+{$COVER_DOMAIN} {
+	request_body {
+		max_size 32MB
+	}
+	reverse_proxy cover-test:8000 {
+		transport http {
+			response_header_timeout 90s
+		}
+	}
+}
+
+{$HIRSCHBERG_DOMAIN} {
+	request_body {
+		max_size 12MB
+	}
+	reverse_proxy hirschberg:10000 {
+		transport http {
+			response_header_timeout 90s
+		}
+	}
+}
