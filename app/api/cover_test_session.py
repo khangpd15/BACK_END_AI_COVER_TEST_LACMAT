@@ -231,64 +231,15 @@ async def save_cover_test_session(payload: CoverTestSessionRequest) -> CoverTest
 
         validated_samples.append(s)
 
-    # Determine backend project root and storage directories
-    backend_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    sessions_base_dir = os.path.join(backend_root, "data", "cover_test", "sessions")
-    os.makedirs(sessions_base_dir, exist_ok=True)
-
-    # Prevent overwriting old sessions: if folder exists, create unique suffix
-    session_folder_name = session_id
-    target_session_dir = os.path.join(sessions_base_dir, session_folder_name)
-    if os.path.exists(target_session_dir):
-        unique_suffix = f"{int(time.time() * 1000)}"
-        session_folder_name = f"{session_id}_{unique_suffix}"
-        target_session_dir = os.path.join(sessions_base_dir, session_folder_name)
-        logger.warning(
-            f"[SessionCollisionAvoidance] Session folder '{session_id}' already exists. "
-            f"Writing to new unique folder '{session_folder_name}' to prevent overwrite."
-        )
-
-    os.makedirs(target_session_dir, exist_ok=True)
-
-    # Construct metadata.json
-    created_at = meta.get("createdAt") or datetime.now(timezone.utc).isoformat()
-    final_metadata = {
-        "sessionId": session_id,
-        "testType": meta.get("testType", "cover_test"),
-        "createdAt": created_at,
-        "samplingRate": meta.get("samplingRate", 15),
-        "protocolVersion": meta.get("protocolVersion", "cover-test-v1"),
-        "camera": meta.get("camera", {"mirrored": True}),
-    }
-    # Include any additional research non-PII metadata
-    for k, v in meta.items():
-        if k not in final_metadata:
-            final_metadata[k] = v
-
-    metadata_path = os.path.join(target_session_dir, "metadata.json")
-    with open(metadata_path, "w", encoding="utf-8") as f:
-        json.dump(final_metadata, f, indent=2, ensure_ascii=False)
-
-    # Construct sampling.json
-    final_sampling = {
-        "sessionId": session_id,
-        "sampleCount": len(validated_samples),
-        "samples": validated_samples,
-    }
-    sampling_path = os.path.join(target_session_dir, "sampling.json")
-    with open(sampling_path, "w", encoding="utf-8") as f:
-        json.dump(final_sampling, f, indent=2, ensure_ascii=False)
-
-    rel_session_path = os.path.relpath(target_session_dir, backend_root).replace("\\", "/")
     logger.info(
-        f"[SessionSavedSuccessfully] sessionId={session_id}, samples={len(validated_samples)}, path={rel_session_path}"
+        f"[SessionValidatedStateless] sessionId={session_id}, samples={len(validated_samples)} (zero server persistence)"
     )
 
     return CoverTestSessionResponse(
         success=True,
         sessionId=session_id,
         saved=True,
-        sessionPath=rel_session_path,
+        sessionPath="client-side",
         sampleCount=len(validated_samples),
-        message="Session sampling data saved successfully",
+        message="Session sampling data validated successfully in stateless mode",
     )

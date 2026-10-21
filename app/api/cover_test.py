@@ -1,3 +1,8 @@
+
+async def get_db_session():
+    """Stateless dependency stub for backwards compatibility."""
+    yield None
+
 """New API endpoint for RemiCare Cover Test persistent cloud storage and research inference."""
 
 import json
@@ -6,9 +11,6 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status, Request
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from app.services.cover_test.multimodal_service import MAX_IMAGE_BYTES
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.db.database import get_db_session
 from app.schemas.cover_test import (
     CoverTestSessionMetadataInput,
     CoverTestSessionResponse,
@@ -46,8 +48,7 @@ async def persist_cover_test_session(
     representative_image: Optional[UploadFile] = File(None, description="Deprecated/Ignored: Biometric images are not persisted to protect customer privacy"),
     uncover_manifest: Optional[str] = Form(None),
     run_inference: bool = Query(True, description="Whether to execute AI inference after storage"),
-    db: AsyncSession = Depends(get_db_session),
-) -> CoverTestSessionResponse:
+    ) -> CoverTestSessionResponse:
     # 1. Parse session_metadata JSON
     try:
         meta_dict = json.loads(session_metadata)
@@ -106,7 +107,7 @@ async def persist_cover_test_session(
 
     # 4. Delegate to Session Service
     try:
-        session_service = CoverTestSessionService(db_session=db)
+        session_service = CoverTestSessionService(db_session=None)
         return await session_service.persist_session(
             metadata_input=metadata_obj,
             raw_trajectories=raw_trajectories,

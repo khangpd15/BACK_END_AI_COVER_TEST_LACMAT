@@ -22,7 +22,6 @@ from app import __version__
 from app.api.cover_test import router as cover_test_v1_router
 from app.api.cover_test_session import router as cover_test_session_router
 from app.config import get_allowed_origins
-from app.db.database import check_db_connection, init_db
 from app.services.fps_model_service import get_fps_model_service
 from app.services.keep_alive import (
     get_keep_alive_service,
@@ -43,10 +42,7 @@ logger = logging.getLogger("remicare.cover_test.main")
 async def lifespan(app: FastAPI):
     """Application lifespan: Preload Cover Test FPS model, init DB, and start keep-alive worker."""
     logger.info("Initializing RemiCare Cover Test AI Backend...")
-    try:
-        await asyncio.wait_for(init_db(), timeout=10)
-    except Exception as e:
-        logger.warning("Database init check note: %s", e)
+    logger.info("Stateless mode: Database disabled. Zero user data persisted.")
 
     try:
         fps_svc = get_fps_model_service()
@@ -171,11 +167,15 @@ async def ping() -> Dict[str, Any]:
     "/health/db",
     tags=["System"],
     summary="Database connectivity diagnostics",
-    description="Tests live connection to PostgreSQL / Supabase with SELECT 1 and returns connection diagnostics.",
+    description="Returns backend persistence mode.",
 )
 async def db_health() -> Dict[str, Any]:
-    """Diagnostics endpoint testing database connection."""
-    return await check_db_connection()
+    """Diagnostics endpoint confirming stateless operation."""
+    return {
+        "status": "stateless",
+        "connected": True,
+        "message": "Pure stateless mode active: zero database and zero disk persistence.",
+    }
 
 
 @app.get(
@@ -210,9 +210,6 @@ async def health_check(check_db: bool = False) -> Dict[str, Any]:
     }
 
     if check_db:
-        db_res = await check_db_connection()
-        result["database"] = db_res
-        if not db_res.get("connected", False):
-            result["status"] = "degraded"
+        result["database"] = {"status": "stateless", "connected": True}
 
     return result

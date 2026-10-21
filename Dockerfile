@@ -10,7 +10,7 @@ COPY app ./app
 COPY models ./models
 COPY docker ./docker
 RUN useradd --uid 10001 --create-home remicare \
-    && mkdir -p data && chown -R remicare:remicare /srv/remicare
+    && chown -R remicare:remicare /srv/remicare
 USER remicare
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=12s --start-period=60s --retries=3 \

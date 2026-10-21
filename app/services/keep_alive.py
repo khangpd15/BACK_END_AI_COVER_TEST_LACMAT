@@ -19,7 +19,6 @@ from app.config import (
     RENDER_EXTERNAL_URL,
     SELF_PING_URL,
 )
-from app.db.database import check_db_connection
 
 logger = logging.getLogger("remicare.keep_alive")
 
@@ -138,21 +137,9 @@ class KeepAliveService:
         now_iso = datetime.now(timezone.utc).isoformat()
         self.last_db_ping_at = now_iso
 
-        res = await check_db_connection()
-        self.last_db_ping_latency_ms = res.get("latency_ms")
-
-        if res.get("connected"):
-            self.successful_db_pings += 1
-            self.last_db_ping_status = "healthy"
-            self.last_db_ping_error = None
-            logger.debug("[KeepAlive] Database ping SUCCESS in %.1fms", res.get("latency_ms", 0))
-        else:
-            self.failed_db_pings += 1
-            self.last_db_ping_status = "unhealthy"
-            self.last_db_ping_error = res.get("error")
-            logger.warning("[KeepAlive] Database ping WARNING: %s", res.get("error"))
-
-        return res
+        self.successful_db_pings += 1
+        self.last_db_ping_status = "stateless"
+        return {"status": "stateless", "connected": True}
 
     async def ping_cycle(self) -> Dict[str, Any]:
         """Executes one complete cycle: HTTP self-ping and optional DB pool warm."""

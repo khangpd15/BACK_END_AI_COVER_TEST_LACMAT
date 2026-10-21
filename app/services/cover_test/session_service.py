@@ -10,10 +10,11 @@ import uuid
 import hashlib
 from typing import Any, Dict, List, Optional, Tuple
 from fastapi import HTTPException, status
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.config import ENABLE_AI_INFERENCE_ON_SAVE
-from app.db.repositories.cover_test_repository import CoverTestRepository
+try:
+    from app.db.repositories.cover_test_repository import CoverTestRepository
+except ImportError:
+    CoverTestRepository = None
 from app.schemas.cover_test import (
     CoverTestSessionMetadataInput,
     CoverTestSessionResponse,
@@ -238,11 +239,11 @@ class CoverTestSessionService:
 
     def __init__(
         self,
-        db_session: AsyncSession,
+        db_session: Optional[Any] = None,
         storage_service: Optional[StorageService] = None,
     ):
         self.db_session = db_session
-        self.repo = CoverTestRepository(db_session)
+        self.repo = CoverTestRepository(db_session) if (CoverTestRepository and db_session) else None
         self.storage = storage_service or get_storage_service()
 
     async def persist_session(
@@ -352,7 +353,8 @@ class CoverTestSessionService:
             })
 
         # Save cycles to database
-        db_cycles = await self.repo.upsert_cycles(session_uuid, cycles_to_save)
+        if self.repo and hasattr(self.repo, 'upsert_cycles'):
+            await self.repo.upsert_cycles(session_uuid, cycles_to_save)
 
         # 6. Save validated eye crops only, with frame/time links and checksums.
         # Never accept a client-controlled storage path or store full-face frames.
@@ -395,7 +397,8 @@ class CoverTestSessionService:
             await asyncio.gather(*upload_tasks)
 
         # Commit DB transaction so raw numeric trajectories and metadata are guaranteed persisted
-        await self.db_session.commit()
+        if self.db_session and hasattr(self.db_session, 'commit'):
+            await self.db_session.commit()
         logger.info(
             "[CoverTestSessionPersisted] sessionId=%s, cycles=%d, storage=%s",
             session_id_str,
@@ -417,7 +420,7 @@ class CoverTestSessionService:
                 )
             else:
                 ai_result_payload = inconclusive("INFERENCE_DISABLED", list(decoded_events))
-            if ai_result_payload.get("model", {}).get("loaded") and ai_result_payload.get("inputModalities"):
+            if self.repo and hasattr(self.repo, 'upsert_result') and ai_result_payload.get("model", {}).get("loaded") and ai_result_payload.get("inputModalities"):
                 await self.repo.upsert_result(session_id=session_uuid, result_data={
                     "model_name": ai_result_payload["model"]["name"],
                     "model_version": ai_result_payload["model"].get("version") or "unversioned",
@@ -507,7 +510,8 @@ class CoverTestSessionService:
                             "notice": target_notice,
                         },
                     )
-                    await self.db_session.commit()
+                    if self.db_session and hasattr(self.db_session, 'commit'):
+                        await self.db_session.commit()
                     logger.info("[DATABASE]\ninsert = success\nrecord_id = %s", str(result_record.result_id))
 
                     ai_result_payload = {
@@ -537,7 +541,8 @@ class CoverTestSessionService:
 
         # Update final processing status
         await self.repo.update_session_status(session_uuid, processing_status)
-        await self.db_session.commit()
+        if self.db_session and hasattr(self.db_session, 'commit'):
+            await self.db_session.commit()
 
         return CoverTestSessionResponse(
             success=True,
