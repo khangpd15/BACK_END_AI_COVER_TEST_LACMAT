@@ -1,7 +1,7 @@
 """Keep-Alive and Self-Ping background service for RemiCare backend on Render.
 
 Prevents Render Free Tier services from spinning down after 15 minutes of inactivity,
-and periodically exercises the Supabase database connection pool to avoid idle drops
+and periodically exercises the database connection pool to avoid idle drops
 and inactive project pausing.
 """
 
@@ -133,7 +133,7 @@ class KeepAliveService:
             }
 
     async def ping_database(self) -> Dict[str, Any]:
-        """Performs a lightweight SELECT 1 DB ping to warm pool and prevent Supabase timeout."""
+        """Performs a lightweight SELECT 1 DB ping to warm pool and prevent DB connection timeout."""
         self.total_db_pings += 1
         now_iso = datetime.now(timezone.utc).isoformat()
         self.last_db_ping_at = now_iso

@@ -19,7 +19,7 @@ from app.schemas.cover_test import (
     CoverTestSessionResponse,
 )
 from app.services.cover_test.storage_service import (
-    SupabaseStorageService,
+    StorageService,
     get_storage_service,
 )
 
@@ -239,7 +239,7 @@ class CoverTestSessionService:
     def __init__(
         self,
         db_session: AsyncSession,
-        storage_service: Optional[SupabaseStorageService] = None,
+        storage_service: Optional[StorageService] = None,
     ):
         self.db_session = db_session
         self.repo = CoverTestRepository(db_session)
@@ -316,7 +316,7 @@ class CoverTestSessionService:
             else:
                 duration_ms = max(0, int(round(float(samples[-1].get("t", 0))))) if samples else 0
 
-            # Upload raw.json to Supabase Storage
+            # Upload raw.json to storage
             cycle_folder_name = f"cycle_{cycle_num:02d}"
             raw_json_storage_path = f"{storage_prefix}/{cycle_folder_name}/raw.json"
             clean_raw_payload = {

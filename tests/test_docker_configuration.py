@@ -7,10 +7,8 @@ from unittest.mock import AsyncMock
 import pytest
 
 
-def test_container_refuses_missing_credentials(monkeypatch):
-    for key in ("DATABASE_URL", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY",
-                "REMICARE_FRONTEND_ORIGINS"):
-        monkeypatch.delenv(key, raising=False)
+def test_container_refuses_missing_origins(monkeypatch):
+    monkeypatch.delenv("REMICARE_FRONTEND_ORIGINS", raising=False)
     entry = runpy.run_path(str(Path(__file__).resolve().parents[1] / "docker/start.py"))
     with pytest.raises(RuntimeError, match="required environment"):
         entry["validate_environment"]()

@@ -63,22 +63,9 @@ def get_db_connect_args(url: str) -> Dict[str, Any]:
 
     clean = url.strip().lower()
     
-    if "db." in clean and "supabase.co" in clean:
-        logger.warning(
-            "========================================================================\n"
-            "[SUPABASE DIRECT CONNECTION DETECTED]\n"
-            "URL contains 'db.*.supabase.co'. Direct Supabase connections use IPv6.\n"
-            "On Render (which does not support outbound IPv6), this triggers:\n"
-            "    --> OSError: [Errno 101] Network is unreachable\n"
-            "RECOMMENDED ACTION: In your Render Environment Variables, change DATABASE_URL\n"
-            "to use the Supabase Connection Pooler (Supavisor IPv4):\n"
-            "    postgresql+asyncpg://postgres.[REF]:[PASSWORD]@aws-0-[REGION].pooler.supabase.com:6543/postgres\n"
-            "========================================================================"
-        )
-
-    if "pooler.supabase.com" in clean or ":6543" in clean:
+    if "pooler" in clean or ":6543" in clean:
         logger.info(
-            "[SupabasePooler] Supavisor connection pooler detected. "
+            "[ConnectionPooler] Transaction pooler detected. "
             "Disabling asyncpg prepared statement cache for transaction pooling."
         )
         connect_args["statement_cache_size"] = 0
@@ -214,17 +201,10 @@ async def check_db_connection() -> Dict[str, Any]:
     except Exception as e:
         latency_ms = (time.perf_counter() - start_time) * 1000.0
         error_msg = str(e)
-        is_errno_101 = "101" in error_msg or "network is unreachable" in error_msg.lower()
         logger.warning("[DBHealthCheckFailed] %s", error_msg)
         return {
             "status": "unhealthy",
             "latency_ms": round(latency_ms, 2),
             "connected": False,
             "error": error_msg,
-            "is_errno_101": is_errno_101,
-            "remediation": (
-                "Errno 101 Network is unreachable indicates Render cannot route to direct Supabase IPv6 address. "
-                "Update DATABASE_URL to use Supavisor IPv4 Pooler: aws-0-[region].pooler.supabase.com:6543 (or port 5432)."
-                if is_errno_101 else None
-            ),
         }

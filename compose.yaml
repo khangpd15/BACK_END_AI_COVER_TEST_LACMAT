@@ -2,16 +2,18 @@ name: remicare-cover
 services:
   cover-test:
     build: .
+    container_name: remicare-cover-backend
     platform: linux/amd64
     restart: unless-stopped
     init: true
-    env_file: .env.docker
     environment:
       APP_ENV: production
+      PORT: "8000"
       KEEP_ALIVE_ENABLED: "false"
       ENABLE_LEGACY_SCHEMA_CLEANUP: "false"
+      REMICARE_FRONTEND_ORIGINS: "https://remicare.id.vn,https://www.remicare.id.vn,https://cover-test.remicare.id.vn,http://localhost:5173,http://localhost:3000"
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8002:8000"
     volumes:
       - cover-data:/srv/remicare/data
     security_opt: ["no-new-privileges:true"]

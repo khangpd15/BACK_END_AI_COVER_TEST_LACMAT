@@ -1,0 +1,163 @@
+name: RemiCare Cover Test AI CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+concurrency:
+  group: covertest-production-deployment
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ==========================================
+  # JOB 1: RUN TEST SUITE
+  # ==========================================
+  test:
+    name: Run Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run unit tests with pytest
+        run: |
+          python -m pytest
+
+  # ==========================================
+  # JOB 2: BUILD & PUSH DOCKER IMAGE TO GHCR
+  # ==========================================
+  build-and-push:
+    name: Build & Push Image to GHCR
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.vars.outputs.image_tag }}
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Compute Tag SHA
+        id: vars
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "image_tag=sha-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata (Tags & Labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,format=short,prefix=sha-
+            type=raw,value=latest,enable=true
+
+      - name: Build and Push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ==========================================
+  # JOB 3: DEPLOY VIA SSH TO PRODUCTION VPS
+  # ==========================================
+  deploy:
+    name: Deploy to Production VPS
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy via SSH to VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          port: ${{ secrets.SSH_PORT }}
+          key: ${{ secrets.SSH_KEY }}
+          script_stop: true
+          script: |
+            set -e
+            mkdir -p ~/app/covertest && cd ~/app/covertest
+
+            NEW_TAG="${{ needs.build-and-push.outputs.image_tag }}"
+            LOWER_REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+            FULL_IMAGE="ghcr.io/${LOWER_REPO}:${NEW_TAG}"
+
+            echo "=========================================="
+            echo "Starting deployment for Cover Test AI: ${NEW_TAG}"
+            echo "Image: ${FULL_IMAGE}"
+            echo "=========================================="
+
+            # 1. Kéo image mới từ GHCR về VPS
+            docker pull "${FULL_IMAGE}"
+
+            # 2. Khởi tạo docker-compose.prod.yml nếu chưa có
+            if [ ! -f docker-compose.prod.yml ]; then
+              echo "bmFtZTogcmVtaWNhcmUtY292ZXIKc2VydmljZXM6CiAgY292ZXItdGVzdDoKICAgIGltYWdlOiBnaGNyLmlvL2toYW5ncGQxNS9iYWNrX2VuZF9haV9jb3Zlcl90ZXN0X2xhY21hdDpsYXRlc3QKICAgIGNvbnRhaW5lcl9uYW1lOiByZW1pY2FyZS1jb3Zlci1iYWNrZW5kCiAgICBwbGF0Zm9ybTogbGludXgvYW1kNjQKICAgIHJlc3RhcnQ6IHVubGVzcy1zdG9wcGVkCiAgICBpbml0OiB0cnVlCiAgICBlbnZpcm9ubWVudDoKICAgICAgQVBQX0VOVjogcHJvZHVjdGlvbgogICAgICBQT1JUOiAiODAwMCIKICAgICAgS0VFUF9BTElWRV9FTkFCTEVEOiAiZmFsc2UiCiAgICAgIEVOQUJMRV9MRUdBQ1lfU0NIRU1BX0NMRUFOVVA6ICJmYWxzZSIKICAgICAgUkVNSUNBUkVfRlJPTlRFTkRfT1JJR0lOUzogImh0dHBzOi8vcmVtaWNhcmUuaWQudm4saHR0cHM6Ly93d3cucmVtaWNhcmUuaWQudm4saHR0cHM6Ly9jb3Zlci10ZXN0LnJlbWljYXJlLmlkLnZuLGh0dHA6Ly9sb2NhbGhvc3Q6NTE3MyxodHRwOi8vbG9jYWxob3N0OjMwMDAiCiAgICAgIE9NUF9OVU1fVEhSRUFEUzogIjEiCiAgICAgIE9QRU5CTEFTX05VTV9USFJFQURTOiAiMSIKICAgICAgTUtMX05VTV9USFJFQURTOiAiMSIKICAgIHBvcnRzOgogICAgICAtICIxMjcuMC4wLjE6ODAwMjo4MDAwIgogICAgdm9sdW1lczoKICAgICAgLSBjb3Zlci1kYXRhOi9zcnYvcmVtaWNhcmUvZGF0YQogICAgc2VjdXJpdHlfb3B0OiBbIm5vLW5ldy1wcml2aWxlZ2VzOnRydWUiXQogICAgY2FwX2Ryb3A6IFtBTExdCiAgICBoZWFsdGhjaGVjazoKICAgICAgdGVzdDoKICAgICAgICAtIENNRAogICAgICAgIC0gcHl0aG9uCiAgICAgICAgLSAtYwogICAgICAgIC0gImltcG9ydCB1cmxsaWIucmVxdWVzdDsgdXJsbGliLnJlcXVlc3QudXJsb3BlbignaHR0cDovLzEyNy4wLjAuMTo4MDAwL3BpbmcnLCB0aW1lb3V0PTUpIgogICAgICBpbnRlcnZhbDogMzBzCiAgICAgIHRpbWVvdXQ6IDVzCiAgICAgIHJldHJpZXM6IDMKICAgICAgc3RhcnRfcGVyaW9kOiA0NXMKICAgIGxvZ2dpbmc6CiAgICAgIGRyaXZlcjoganNvbi1maWxlCiAgICAgIG9wdGlvbnM6IHttYXgtc2l6ZTogIjEwbSIsIG1heC1maWxlOiAiMyJ9CnZvbHVtZXM6CiAgY292ZXItZGF0YToK" | base64 -d > docker-compose.prod.yml
+            fi
+
+            # 3. Cập nhật tag mới
+            sed -i -E "s|image: ghcr.io/${LOWER_REPO}:.*|image: ${FULL_IMAGE}|g" docker-compose.prod.yml
+
+            # 4. Khởi động lại container
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans
+
+            # 5. Kiểm tra sức khỏe (Healthcheck loop)
+            echo "Waiting for Cover Test backend health..."
+            HEALTHY=0
+            for i in $(seq 1 15); do
+              sleep 4
+              STATUS=$(docker inspect --format='{{.State.Health.Status}}' remicare-cover-backend 2>/dev/null || echo "starting")
+              echo "Check $i/15: Health status is '$STATUS'"
+              if [ "$STATUS" = "healthy" ]; then
+                HEALTHY=1
+                break
+              fi
+            done
+
+            if [ "$HEALTHY" -ne 1 ]; then
+              echo "ERROR: Cover Test Healthcheck failed!"
+              docker logs --tail 50 remicare-cover-backend
+              exit 1
+            fi
+
+            # 6. Dọn dẹp image cũ
+            docker image prune -f
+
+            echo "=========================================="
+            echo "COVER TEST DEPLOYMENT SUCCESSFUL!"
+            echo "Live version is now: ${NEW_TAG}"
+            echo "=========================================="
