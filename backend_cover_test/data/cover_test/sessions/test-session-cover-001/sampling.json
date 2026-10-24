@@ -1,0 +1,30 @@
+{
+  "sessionId": "test-session-cover-001",
+  "sampleCount": 2,
+  "samples": [
+    {
+      "timestamp": 100.0,
+      "phase": "BASELINE",
+      "leftEye": {
+        "x": 0.45,
+        "y": 0.5
+      },
+      "rightEye": {
+        "x": 0.55,
+        "y": 0.5
+      }
+    },
+    {
+      "timestamp": 166.7,
+      "phase": "BASELINE",
+      "leftEye": {
+        "x": 0.45,
+        "y": 0.5
+      },
+      "rightEye": {
+        "x": 0.55,
+        "y": 0.5
+      }
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "sessionId": "test-session-cover-001",
+  "testType": "cover_test",
+  "createdAt": "2026-10-16T08:29:32.524706+00:00",
+  "samplingRate": 15,
+  "protocolVersion": "cover-test-v1",
+  "camera": {
+    "mirrored": true
+  }
+}
