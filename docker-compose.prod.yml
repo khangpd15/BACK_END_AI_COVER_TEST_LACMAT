@@ -10,6 +10,7 @@ services:
       APP_ENV: production
       PORT: "8000"
       KEEP_ALIVE_ENABLED: "false"
+      COVER_MULTIMODAL_MODEL_PATH: /srv/remicare/models/cover_multimodal_model.joblib
       REMICARE_FRONTEND_ORIGINS: "https://remicare.id.vn,https://www.remicare.id.vn,https://cover-test.remicare.id.vn,http://localhost:5173,http://localhost:3000"
       OMP_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"

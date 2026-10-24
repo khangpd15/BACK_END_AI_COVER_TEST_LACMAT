@@ -66,6 +66,8 @@ class MultimodalCoverPredictor:
                 "classProbabilities": {"NORMAL": 0.5, "STRABISMUS": 0.5},
                 "analyzedEventIds": [],
                 "isReliable": False,
+                "inputModalities": [],
+                "notice": "Research-only image model; no usable eye-image pair was analyzed.",
             }
 
         probs_list = []
@@ -90,6 +92,8 @@ class MultimodalCoverPredictor:
                 "classProbabilities": {"NORMAL": 0.5, "STRABISMUS": 0.5},
                 "analyzedEventIds": [],
                 "isReliable": False,
+                "inputModalities": [],
+                "notice": "Research-only image model; no usable eye-image pair was analyzed.",
             }
 
         avg_probs = np.mean(probs_list, axis=0)
@@ -106,6 +110,7 @@ class MultimodalCoverPredictor:
                 "STRABISMUS": p_strab,
             },
             "analyzedEventIds": ids,
-            "isReliable": True,
-            "notice": "Multimodal Cover Test fusion model (Korean timestamp trajectory + Hirschberg eye crops)",
+            "isReliable": False,
+            "inputModalities": ["uncover_eye_images"],
+            "notice": "Research-only eye-image model; this runtime does not consume trajectory features.",
         }

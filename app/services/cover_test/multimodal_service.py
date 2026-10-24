@@ -7,6 +7,7 @@ from io import BytesIO
 import math
 import os
 from functools import lru_cache
+from pathlib import Path
 
 import joblib
 import numpy as np
@@ -15,6 +16,7 @@ from PIL import Image, UnidentifiedImageError
 
 MAX_IMAGE_BYTES = 1024 * 1024
 CONTRACT = "cover-uncover-multimodal-v1"
+DEFAULT_MODEL_PATH = Path(__file__).resolve().parents[3] / "models" / "cover_multimodal_model.joblib"
 
 
 def reject(message):
@@ -115,15 +117,26 @@ class MultimodalCoverService:
     def __init__(self, artifact_path=None):
         self.artifact = None
         self.load_error = False
-        path = artifact_path or os.getenv("COVER_MULTIMODAL_MODEL_PATH")
-        if path:
-            try:
-                artifact = joblib.load(path)  # trusted administrator-configured artifact only
-                if artifact.get("contract") != CONTRACT or not callable(getattr(artifact.get("model"), "predict_multimodal", None)):
-                    raise ValueError("Multimodal artifact contract mismatch")
-                self.artifact = artifact
-            except Exception:
-                self.load_error = True
+        # An explicit deployment path wins; otherwise load the artifact shipped
+        # in the Docker image at /srv/remicare/models/.
+        path = artifact_path or os.getenv("COVER_MULTIMODAL_MODEL_PATH") or DEFAULT_MODEL_PATH
+        try:
+            artifact = joblib.load(path)  # trusted administrator-configured artifact only
+            if artifact.get("contract") != CONTRACT or not callable(getattr(artifact.get("model"), "predict_multimodal", None)):
+                raise ValueError("Multimodal artifact contract mismatch")
+            self.artifact = artifact
+        except Exception:
+            self.load_error = True
+
+    def health(self):
+        """Expose model availability without leaking artifact or file details."""
+        if self.artifact is None:
+            return {"loaded": False, "status": "load_failed" if self.load_error else "not_loaded"}
+        return {
+            "loaded": True,
+            "name": self.artifact.get("name", CONTRACT),
+            "version": self.artifact.get("version"),
+        }
 
     def predict(self, trajectories, decoded):
         ids = list(decoded)
@@ -154,7 +167,7 @@ class MultimodalCoverService:
                 "status": "INCONCLUSIVE" if prediction == "INCONCLUSIVE" else "COMPLETED",
                 "prediction": prediction, "classProbabilities": probabilities,
                 "confidence": probabilities.get(prediction), "isReliable": bool(result.get("isReliable", False)),
-                "inputModalities": ["time_series", "uncover_eye_images"], "analyzedEventIds": ids,
+                "inputModalities": result.get("inputModalities", []), "analyzedEventIds": ids,
                 "model": {"name": self.artifact.get("name", CONTRACT),
                           "version": self.artifact.get("version"), "loaded": True},
                 "notice": result.get("notice", "Combined image and trajectory model output."),

@@ -123,9 +123,10 @@ Build/deploy lại frontend sau khi đổi biến Vite. URL không thêm `/api/.
 ## 5. Mô hình và dữ liệu
 
 - Hirschberg chạy bundle production sẵn có, không tải pretrained weights lúc chạy.
-- Cover nhận/lưu timestamp và crop bỏ che. Artifact fusion chỉ được bật khi có file
-  thật với hợp đồng phù hợp: đặt trong `app/models/`, cấu hình
-  `COVER_MULTIMODAL_MODEL_PATH=/srv/remicare/app/models/ten-model.joblib`, rồi rebuild.
+- Cover nhận/lưu timestamp và crop bỏ che. Docker image đóng gói artifact
+  `models/cover_multimodal_model.joblib` và Compose trỏ
+  `COVER_MULTIMODAL_MODEL_PATH=/srv/remicare/models/cover_multimodal_model.joblib`.
+  Health endpoint trả trạng thái riêng trong `multimodalModel`.
 - Hai API không tự trở thành một model fusion khi đặt chung VPS.
   Nhánh nghiên cứu v0.5 dùng subprocess từ thư mục train trên Windows **không được
   đóng gói vào image Cover**. Không đặt đường dẫn `D:\...` trong container; cấu hình

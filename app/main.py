@@ -56,6 +56,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("Failed to initialize Cover Test FPS service at startup: %s", e, exc_info=True)
 
+    try:
+        from app.services.cover_test.multimodal_service import get_multimodal_cover_service
+        multimodal_svc = get_multimodal_cover_service()
+        logger.info("Cover Test multimodal model state: %s", multimodal_svc.health())
+    except Exception as e:
+        logger.error("Failed to initialize Cover Test multimodal service at startup: %s", e, exc_info=True)
+
     # Start automated keep-alive self-ping and DB pool warming worker
     start_keep_alive()
 
@@ -198,6 +205,12 @@ async def health_check(check_db: bool = False) -> Dict[str, Any]:
     except Exception:
         model_info = {"status": "not_loaded"}
 
+    try:
+        from app.services.cover_test.multimodal_service import get_multimodal_cover_service
+        multimodal_info = get_multimodal_cover_service().health()
+    except Exception:
+        multimodal_info = {"status": "not_loaded"}
+
     keep_alive_info = get_keep_alive_service().get_status()
 
     result: Dict[str, Any] = {
@@ -205,6 +218,7 @@ async def health_check(check_db: bool = False) -> Dict[str, Any]:
         "service": "remicare-cover-test-ai",
         "version": __version__,
         "model": model_info,
+        "multimodalModel": multimodal_info,
         "deploymentCommit": os.getenv("RENDER_GIT_COMMIT"),
         "keepAlive": keep_alive_info,
     }
