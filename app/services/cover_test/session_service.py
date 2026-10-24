@@ -1,27 +1,18 @@
-import asyncio
 """Core business logic service for Cover Test session persistence, validation, storage, and AI inference."""
 
-from datetime import datetime, timezone
-import json
 import logging
 import math
 import re
 import uuid
-import hashlib
 from typing import Any, Dict, List, Optional, Tuple
 from fastapi import HTTPException, status
 from app.config import ENABLE_AI_INFERENCE_ON_SAVE
-try:
-    from app.db.repositories.cover_test_repository import CoverTestRepository
-except ImportError:
-    CoverTestRepository = None
 from app.schemas.cover_test import (
     CoverTestSessionMetadataInput,
     CoverTestSessionResponse,
 )
 from app.services.cover_test.storage_service import (
     StorageService,
-    get_storage_service,
 )
 
 logger = logging.getLogger("remicare.session_service")
@@ -243,8 +234,8 @@ class CoverTestSessionService:
         storage_service: Optional[StorageService] = None,
     ):
         self.db_session = db_session
-        self.repo = CoverTestRepository(db_session) if (CoverTestRepository and db_session) else None
-        self.storage = storage_service or get_storage_service()
+        self.repo = None
+        self.storage = None
 
     async def persist_session(
         self,
@@ -270,289 +261,40 @@ class CoverTestSessionService:
                 uncover_manifest, raw_trajectories, uncover_images or {}, session_id_str,
             )
 
-        # 3. Determine storage paths
-        now_utc = datetime.now(timezone.utc)
-        year_str = now_utc.strftime("%Y")
-        month_str = now_utc.strftime("%m")
-        storage_root = f"cover-test-raw/{year_str}/{month_str}/{session_id_str}"
-        storage_prefix = f"{year_str}/{month_str}/{session_id_str}"
+        # Validate and infer entirely within this request. No repository, files,
+        # or singleton memory store may retain the user's measurements or images.
+        if not raw_trajectories:
+            raise HTTPException(status_code=422, detail="No cycle samples supplied")
+        for cycle_num, raw in raw_trajectories.items():
+            validate_cycle_samples(raw.get("samples") or [], cycle_num)
 
-        # 4. Upsert session initial state
-        session_record = await self.repo.upsert_session(
-            session_id=session_uuid,
-            cycle_count=len(raw_trajectories),
-            sampling_rate_hz=metadata_input.samplingRateHz,
-            source_device=metadata_input.sourceDevice,
-            tracker=metadata_input.tracker,
-            raw_schema_version=metadata_input.rawSchemaVersion,
-            storage_root=storage_root,
-            processing_status="UPLOADING",
-            client_metadata=metadata_input.clientMetadata or {},
-        )
-
-        # 5. Process and validate cycles
-        cycles_to_save = []
-        manifest_cycles = []
-        raw_uploads = []
-        img_uploads = []
-        total_samples_saved = 0
-
-        for cycle_num in sorted(raw_trajectories.keys()):
-            raw_cycle = raw_trajectories[cycle_num]
-            samples = raw_cycle.get("samples") or []
-            total, valid_cnt, v_ratio, mean_q = validate_cycle_samples(samples, cycle_num)
-            v_ratio = max(0.0, min(1.0, float(v_ratio)))
-            mean_q = max(0.0, min(1.0, float(mean_q)))
-            total_samples_saved += total
-
-            covered_eye = normalize_covered_eye(raw_cycle.get("coveredEye"), cycle_num)
-            tracked_eye = normalize_tracked_eye(raw_cycle.get("trackedEye"), cycle_num)
-
-            raw_dur = raw_cycle.get("durationMs")
-            if raw_dur is not None:
-                try:
-                    duration_ms = max(0, int(round(float(raw_dur))))
-                except (ValueError, TypeError):
-                    duration_ms = 0
-            else:
-                duration_ms = max(0, int(round(float(samples[-1].get("t", 0))))) if samples else 0
-
-            # Upload raw.json to storage
-            cycle_folder_name = f"cycle_{cycle_num:02d}"
-            raw_json_storage_path = f"{storage_prefix}/{cycle_folder_name}/raw.json"
-            clean_raw_payload = {
-                "schemaVersion": metadata_input.rawSchemaVersion,
-                "sessionId": session_id_str,
-                "cycle": cycle_num,
-                "coveredEye": covered_eye,
-                "trackedEye": tracked_eye,
-                "samplingRateHz": metadata_input.samplingRateHz,
-                "durationMs": duration_ms,
-                "samples": samples,
-                "uncoverEvents": raw_cycle.get("uncoverEvents", []),
-            }
-            raw_uploads.append((raw_json_storage_path, clean_raw_payload))
-
-            cycles_to_save.append({
-                "cycle_number": cycle_num,
-                "covered_eye": covered_eye,
-                "tracked_eye": tracked_eye,
-                "sample_count": total,
-                "valid_sample_count": valid_cnt,
-                "valid_ratio": v_ratio,
-                "mean_tracking_quality": mean_q,
-                "cycle_status": "COMPLETED",
-                "raw_storage_path": raw_json_storage_path,
-                "duration_ms": duration_ms,
-            })
-            manifest_cycles.append({
-                "cycle": cycle_num,
-                "storagePath": raw_json_storage_path,
-                "sampleCount": total,
-                "validRatio": v_ratio,
-            })
-
-        # Save cycles to database
-        if self.repo and hasattr(self.repo, 'upsert_cycles'):
-            await self.repo.upsert_cycles(session_uuid, cycles_to_save)
-
-        # 6. Save validated eye crops only, with frame/time links and checksums.
-        # Never accept a client-controlled storage path or store full-face frames.
-        stored_images = []
-        for event_id, entry in decoded_events.items():
-            event = entry["event"]
-            for side in ("left", "right"):
-                field = event["crops"][side]["field"]
-                content = uncover_images[field]
-                image_path = f"{storage_prefix}/cycle_{event['cycle']:02d}/{event_id}_{side}.jpg"
-                img_uploads.append((image_path, content))
-                stored_images.append({
-                    "eventId": event_id, "eye": side.upper(), "frameId": event["frameId"],
-                    "timestampMs": event["timestampMs"], "storagePath": image_path,
-                    "sha256": hashlib.sha256(content).hexdigest(), "bytes": len(content),
-                })
-
-        # 7. Upload manifest.json and execute raw JSON storage uploads concurrently
-        manifest_payload = {
-            "sessionId": session_id_str,
-            "createdAt": now_utc.isoformat(),
-            "cycleCount": len(cycles_to_save),
-            "samplingRateHz": metadata_input.samplingRateHz,
-            "cycles": manifest_cycles,
-            "imagesCount": len(stored_images),
-            "images": stored_images,
-            "uncoverManifest": uncover_manifest,
-            "storageRoot": storage_root,
-        }
-
-        # Concurrently upload JSON trajectories and manifest
-        upload_tasks = [
-            self.storage.upload_raw_json(p, d) for p, d in raw_uploads
-        ] + [
-            self.storage.upload_eye_image(p, content) for p, content in img_uploads
-        ] + [
-            self.storage.upload_raw_json(f"{storage_prefix}/manifest.json", manifest_payload)
-        ]
-        if upload_tasks:
-            await asyncio.gather(*upload_tasks)
-
-        # Commit DB transaction so raw numeric trajectories and metadata are guaranteed persisted
-        if self.db_session and hasattr(self.db_session, 'commit'):
-            await self.db_session.commit()
-        logger.info(
-            "[CoverTestSessionPersisted] sessionId=%s, cycles=%d, storage=%s",
-            session_id_str,
-            len(cycles_to_save),
-            storage_root,
-        )
-
-        # 8. 10-15 FPS Model Inference & Final Consensus Persistence (No Images Saved)
-        ai_result_payload = None
-        processing_status = "COMPLETED"
-
+        from app.services.cover_test.multimodal_service import get_multimodal_cover_service, inconclusive
+        from starlette.concurrency import run_in_threadpool
         should_infer = run_inference and ENABLE_AI_INFERENCE_ON_SAVE
-        if uncover_manifest is not None:
-            from app.services.cover_test.multimodal_service import get_multimodal_cover_service, inconclusive
-            from starlette.concurrency import run_in_threadpool
-            if should_infer:
-                ai_result_payload = await run_in_threadpool(
-                    get_multimodal_cover_service().predict, raw_trajectories, decoded_events,
-                )
-            else:
-                ai_result_payload = inconclusive("INFERENCE_DISABLED", list(decoded_events))
-            if self.repo and hasattr(self.repo, 'upsert_result') and ai_result_payload.get("model", {}).get("loaded") and ai_result_payload.get("inputModalities"):
-                await self.repo.upsert_result(session_id=session_uuid, result_data={
-                    "model_name": ai_result_payload["model"]["name"],
-                    "model_version": ai_result_payload["model"].get("version") or "unversioned",
-                    "model_source": "cover_multimodal",
-                    "feature_schema_version": "cover-mm-v1",
-                    "status": ai_result_payload["status"], "input_compatible": True,
-                    "prediction": ai_result_payload["prediction"],
-                    "class_probabilities": ai_result_payload["classProbabilities"],
-                    "confidence": ai_result_payload["confidence"],
-                    "features_snapshot": {"analyzedEventIds": ai_result_payload["analyzedEventIds"]},
-                    "notice": ai_result_payload["notice"],
-                })
-            # No silent fall-through to the trajectory-only classifier.
-            should_infer = False
-        if should_infer:
+        if not should_infer:
+            result = inconclusive("INFERENCE_DISABLED", list(decoded_events))
+        elif uncover_manifest is not None:
+            result = await run_in_threadpool(
+                get_multimodal_cover_service().predict, raw_trajectories, decoded_events,
+            )
+        else:
             from app.services.fps_model_service import get_fps_model_service
-
-            fps_svc = get_fps_model_service()
-            if fps_svc.model is None:
-                ai_result_payload = {
-                    "status": "INCONCLUSIVE",
-                    "prediction": "INCONCLUSIVE",
-                    "reason": "MODEL_NOT_LOADED",
-                    "reasonCodes": ["MODEL_NOT_LOADED"],
-                    "model": {"name": None, "version": None, "loaded": False},
-                    "classProbabilities": None,
-                    "confidence": None,
-                    "isReliable": False,
-                    "notice": "Cover Test data saved; no approved AI model is loaded for this session.",
+            model = get_fps_model_service()
+            if model.model is None:
+                result = inconclusive("MODEL_NOT_LOADED", [])
+            else:
+                prediction = await run_in_threadpool(model.aggregate_and_predict, raw_trajectories)
+                result = {
+                    "status": prediction.status, "prediction": prediction.prediction,
+                    "classProbabilities": prediction.class_probabilities,
+                    "confidence": prediction.class_probabilities.get(prediction.prediction),
+                    "isReliable": prediction.is_reliable,
+                    "model": {"name": prediction.model_name, "version": prediction.model_version, "loaded": True},
+                    "notice": prediction.notice,
                 }
-                should_infer = False
-        if should_infer:
-            from app.services.fps_model_service import get_fps_model_service
-
-            fps_svc = get_fps_model_service()
-
-            # Step 1: Finalize result from 10-15 FPS Model with temporal consensus aggregation
-            try:
-                from starlette.concurrency import run_in_threadpool
-                fps_res = await run_in_threadpool(fps_svc.aggregate_and_predict, raw_trajectories)
-                logger.info(
-                    "[MODEL]\nsource = fps_10_15\nprediction = %s\nprobabilities = %s",
-                    fps_res.prediction,
-                    fps_res.class_probabilities,
-                )
-            except Exception as model_err:
-                logger.error("[MODEL]\nsource = fps_10_15\ninference = failed\nerror = %s", model_err)
-                fps_res = None
-
-            # If 10-15 FPS model inference fails -> DO NOT proceed to DB result insert
-            if fps_res is None or (fps_res.prediction == "INCONCLUSIVE" and fps_res.total_frames_evaluated == 0):
-                logger.warning(
-                    "[AIInferenceFailed] sessionId=%s: 10-15 FPS model failed to evaluate frames. Preserving raw data with PARTIAL_SUCCESS.",
-                    session_id_str,
-                )
-                processing_status = "PARTIAL_SUCCESS"
-                ai_result_payload = None
-            else:
-                # Step 2: Korean transfer models have been retired from runtime.
-                # Cover Test results must come from the active RemiCare-trained model only.
-                comparison_models_list = []
-
-                # Step 3: INSERT 1 record into cover_test_results with 10-15 FPS prediction (NO image stored)
-                target_prediction = fps_res.prediction
-                target_probabilities = fps_res.class_probabilities
-                target_model_name = fps_res.model_name
-                target_model_version = fps_res.model_version
-                target_sampling_profile = "RemiCare Cover Test numeric trajectory consensus"
-                target_notice = fps_res.notice
-
-                try:
-                    result_record = await self.repo.upsert_result(
-                        session_id=session_uuid,
-                        result_data={
-                            "model_name": target_model_name,
-                            "model_version": target_model_version,
-                            "model_source": "fps_10_15_model",
-                            "feature_schema_version": "shared-v1.0.0",
-                            "status": fps_res.status,
-                            "input_compatible": True,
-                            "prediction": target_prediction,
-                            "class_probabilities": target_probabilities,
-                            "confidence": float(target_probabilities.get(target_prediction, 0.5)),
-                            "domain_shift_warning": False,
-                            "features_snapshot": fps_res.features_snapshot,
-                            "comparison_models": comparison_models_list,
-                            "notice": target_notice,
-                        },
-                    )
-                    if self.db_session and hasattr(self.db_session, 'commit'):
-                        await self.db_session.commit()
-                    logger.info("[DATABASE]\ninsert = success\nrecord_id = %s", str(result_record.result_id))
-
-                    ai_result_payload = {
-                        "status": fps_res.status,
-                        "modelSource": "fps_10_15_model",
-                        "prediction": target_prediction,
-                        "classProbability": target_probabilities,
-                        "classProbabilities": target_probabilities,
-                        "confidence": float(target_probabilities.get(target_prediction, 0.5)),
-                        "model": {
-                            "name": target_model_name,
-                            "version": target_model_version,
-                            "source": "fps_10_15_model",
-                        },
-                        "samplingProfile": target_sampling_profile,
-                        "agreementRatio": fps_res.agreement_ratio if fps_res else 1.0,
-                        "isReliable": fps_res.is_reliable if fps_res else True,
-                        "features": fps_res.features_snapshot if fps_res else {},
-                        "comparisonModels": comparison_models_list,
-                        "notice": target_notice,
-                    }
-                    processing_status = "COMPLETED"
-
-                except Exception as db_insert_err:
-                    logger.error("[DATABASE]\ninsert = failed\nerror = %s", db_insert_err)
-                    raise db_insert_err
-
-        # Update final processing status
-        await self.repo.update_session_status(session_uuid, processing_status)
-        if self.db_session and hasattr(self.db_session, 'commit'):
-            await self.db_session.commit()
-
         return CoverTestSessionResponse(
-            success=True,
-            sessionId=session_id_str,
-            saved=True,
-            processingStatus=processing_status,
-            storageRoot=storage_root,
-            cyclesSaved=len(cycles_to_save),
-            imagesSaved=len(stored_images),
-            storageMode="CLOUD" if self.storage.is_live else "MEMORY",
-            aiResult=ai_result_payload,
-            message="Cover test data saved. Check aiResult for model availability and analyzed modalities.",
+            success=True, sessionId=session_id_str, saved=False,
+            processingStatus="COMPLETED", storageRoot="", storageMode="STATELESS",
+            cyclesSaved=0, imagesSaved=0, aiResult=result,
+            message="Analysis completed without retaining user measurements or images.",
         )

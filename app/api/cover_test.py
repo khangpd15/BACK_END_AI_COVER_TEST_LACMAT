@@ -26,11 +26,11 @@ router = APIRouter(prefix="/sessions", tags=["Cover Test Storage"])
     "",
     response_model=CoverTestSessionResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="Persist Cover Test 3-cycle session, trajectories, and eye crops to local storage & database",
+    summary="Analyze Cover Test without storing user data",
     description=(
         "Receives multipart/form-data containing session metadata, 3 raw JSON trajectories, "
         "and frame-linked uncover eye pairs (up to 12 images). "
-        "Guarantees raw data persistence in local storage and database before executing optional AI transfer inference."
+        "Validates and analyzes data in request memory without saving images or measurements."
     ),
 )
 async def persist_cover_test_session(
@@ -120,7 +120,7 @@ async def persist_cover_test_session(
     except Exception as e:
         err_str = str(e)
         logger.error("[CoverTestPersistError] Unhandled session persistence error: %s", err_str, exc_info=True)
-        err_detail = f"Cover test storage error: {err_str}"
+        err_detail = f"Cover test analysis error: {err_str}"
 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

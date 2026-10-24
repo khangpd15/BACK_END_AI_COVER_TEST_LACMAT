@@ -68,7 +68,7 @@ def test_reject_mismatched_or_incomplete_pairs(fault):
     assert error.value.status_code == 422
 
 
-def test_persistence_saves_both_crops_and_frame_manifest(monkeypatch):
+def test_stateless_analysis_never_saves_crops_or_session(monkeypatch):
     from app.services.cover_test import session_service as module
     from app.schemas.cover_test import CoverTestSessionMetadataInput
     monkeypatch.setattr(module, "ENABLE_AI_INFERENCE_ON_SAVE", False)
@@ -79,13 +79,17 @@ def test_persistence_saves_both_crops_and_frame_manifest(monkeypatch):
     result = asyncio.run(service.persist_session(
         CoverTestSessionMetadataInput(sessionId=SESSION), cycles,
         uncover_manifest=manifest, uncover_images=images))
-    assert result.imagesSaved == 2
+    assert result.imagesSaved == 0
+    assert result.cyclesSaved == 0
+    assert result.saved is False
+    assert result.storageMode == "STATELESS"
     assert result.aiResult["reason"] == "INFERENCE_DISABLED"
-    assert service.storage.upload_eye_image.await_count == 2
-    stored = service.storage.upload_raw_json.call_args_list[-1].args[1]
-    assert stored["images"][0]["timestampMs"] == 400.25
-    assert stored["uncoverManifest"] == manifest
+    service.storage.upload_eye_image.assert_not_called()
+    service.storage.upload_raw_json.assert_not_called()
+    service.repo.upsert_session.assert_not_called()
     service.repo.upsert_result.assert_not_called()
+    service.db_session.commit.assert_not_called()
+
 
 
 def test_multipart_route_receives_dynamic_pair_fields(monkeypatch):
