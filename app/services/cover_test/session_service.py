@@ -268,14 +268,16 @@ class CoverTestSessionService:
         for cycle_num, raw in raw_trajectories.items():
             validate_cycle_samples(raw.get("samples") or [], cycle_num)
 
-        from app.services.cover_test.multimodal_service import get_multimodal_cover_service, inconclusive
+        from app.services.cover_test.multimodal_service import inconclusive
+        from app.services.cover_test.unified_inference_service import get_unified_inference_service
         from starlette.concurrency import run_in_threadpool
         should_infer = run_inference and ENABLE_AI_INFERENCE_ON_SAVE
         if not should_infer:
             result = inconclusive("INFERENCE_DISABLED", list(decoded_events))
         elif uncover_manifest is not None:
+            # Unified pipeline: Branch A (multimodal) + Branch B (Hirschberg geometry)
             result = await run_in_threadpool(
-                get_multimodal_cover_service().predict, raw_trajectories, decoded_events,
+                get_unified_inference_service().predict, raw_trajectories, decoded_events,
             )
         else:
             from app.services.fps_model_service import get_fps_model_service
