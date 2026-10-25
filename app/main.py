@@ -211,6 +211,12 @@ async def health_check(check_db: bool = False) -> Dict[str, Any]:
     except Exception:
         multimodal_info = {"status": "not_loaded"}
 
+    try:
+        from app.services.cover_test.unified_inference_service import get_unified_inference_service
+        unified_info = get_unified_inference_service().health()
+    except Exception:
+        unified_info = {"status": "not_loaded"}
+
     keep_alive_info = get_keep_alive_service().get_status()
 
     result: Dict[str, Any] = {
@@ -219,6 +225,7 @@ async def health_check(check_db: bool = False) -> Dict[str, Any]:
         "version": __version__,
         "model": model_info,
         "multimodalModel": multimodal_info,
+        "unifiedModel": unified_info,
         "deploymentCommit": os.getenv("RENDER_GIT_COMMIT"),
         "keepAlive": keep_alive_info,
     }

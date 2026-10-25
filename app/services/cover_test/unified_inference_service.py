@@ -1,4 +1,4 @@
-﻿"""Unified AI inference service for Cover Test.
+"""Unified AI inference service for Cover Test.
 
 Combines two complementary branches:
   Branch A - Cover Test Multimodal (trajectory features + raw pixel features)
@@ -159,6 +159,8 @@ class UnifiedCoverInferenceService:
 
     def health(self) -> Dict[str, Any]:
         return {
+            "loaded": self._multimodal_artifact is not None or self._hirschberg_branch_pipeline is not None,
+            "version": "unified-v1.0.0",
             "multimodal": {
                 "loaded": self._multimodal_artifact is not None,
                 "version": (self._multimodal_artifact or {}).get("version"),
@@ -281,9 +283,7 @@ class UnifiedCoverInferenceService:
         conf = round(fused[pred], 4)
         is_reliable = conf >= 0.60 and len(active) == 2
 
-        all_analyzed = list({
-            eid for _, br in active for eid in br.get("analyzedEventIds", [])
-        })
+        all_analyzed = list(decoded_events.keys())
 
         return {
             "status": "COMPLETED",
@@ -291,6 +291,8 @@ class UnifiedCoverInferenceService:
             "classProbabilities": fused,
             "confidence": conf,
             "isReliable": is_reliable,
+            "inputModalities": ["time_series", "uncover_eye_images"],
+            "receivedModalities": ["time_series", "uncover_eye_images"],
             "analyzedEventIds": all_analyzed,
             "branchesUsed": [br["branch"] for _, br in active],
             "branchDetails": {"multimodal": branch_a, "hirschberg_geometry": branch_b},
@@ -309,7 +311,11 @@ class UnifiedCoverInferenceService:
         return {
             "status": "INCONCLUSIVE", "prediction": "INCONCLUSIVE",
             "reason": reason, "classProbabilities": None, "confidence": None,
-            "isReliable": False, "analyzedEventIds": [], "branchesUsed": [],
+            "isReliable": False,
+            "inputModalities": ["time_series", "uncover_eye_images"],
+            "receivedModalities": ["time_series", "uncover_eye_images"],
+            "analyzedEventIds": event_ids or [],
+            "branchesUsed": [],
             "branchDetails": {"multimodal": branch_a, "hirschberg_geometry": branch_b},
             "model": {"name": "cover-test-unified", "version": "unified-v1.0.0", "loaded": True},
             "notice": f"Unified inference inconclusive: {reason}.",
