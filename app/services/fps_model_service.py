@@ -32,9 +32,9 @@ from app.services.shared_feature_contract import (
 logger = logging.getLogger("remicare.fps_model_service")
 
 # Paths for a future RemiCare-trained Cover Test model artifact.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PRIMARY_15FPS_MODEL_PATH = _PROJECT_ROOT / "models" / "remicare_15fps_candidate.joblib"
-FALLBACK_15FPS_MODEL_PATH = _PROJECT_ROOT.parent / "models" / "candidates" / "remicare_15fps_candidate.joblib"
+FALLBACK_15FPS_MODEL_PATH = _PROJECT_ROOT / "models" / "candidates" / "remicare_15fps_candidate.joblib"
 
 DEFAULT_14_FEATURES = [
     "leftValidRatio",
