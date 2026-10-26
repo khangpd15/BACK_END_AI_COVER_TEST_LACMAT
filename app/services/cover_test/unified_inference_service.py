@@ -160,7 +160,7 @@ class UnifiedCoverInferenceService:
     def health(self) -> Dict[str, Any]:
         return {
             "loaded": self._multimodal_artifact is not None or self._hirschberg_branch_pipeline is not None,
-            "version": "unified-v1.0.0",
+            "version": "unified-v2.0.0",
             "multimodal": {
                 "loaded": self._multimodal_artifact is not None,
                 "version": (self._multimodal_artifact or {}).get("version"),
@@ -185,11 +185,14 @@ class UnifiedCoverInferenceService:
                 "uncoverEvents": decoded_events,
             })
             pred = result.get("prediction", "INCONCLUSIVE")
+            if pred == "INCONCLUSIVE":
+                return None
             probs = result.get("classProbabilities", {})
             if not isinstance(probs, dict) or not probs:
                 return None
             analyzed = result.get("analyzedEventIds", [])
-            if not analyzed:
+            input_modalities = result.get("inputModalities", [])
+            if not analyzed and "time_series" not in input_modalities:
                 return None
             conf = float(probs.get(pred, 0.0))
             return {
@@ -201,8 +204,9 @@ class UnifiedCoverInferenceService:
                 },
                 "confidence": round(conf, 4),
                 "analyzedEventIds": list(analyzed),
-                "coverage": round(len(analyzed) / max(len(decoded_events), 1), 3),
+                "coverage": round(len(analyzed) / max(len(decoded_events), 1), 3) if decoded_events else 1.0,
                 "notice": result.get("notice", ""),
+                "inputModalities": input_modalities,
             }
         except Exception as exc:
             logger.warning("[BranchA] Failed: %s", exc)
@@ -296,7 +300,7 @@ class UnifiedCoverInferenceService:
             "analyzedEventIds": all_analyzed,
             "branchesUsed": [br["branch"] for _, br in active],
             "branchDetails": {"multimodal": branch_a, "hirschberg_geometry": branch_b},
-            "model": {"name": "cover-test-unified", "version": "unified-v1.0.0", "loaded": True},
+            "model": {"name": "cover-test-unified", "version": "unified-v2.0.0", "loaded": True},
             "notice": (
                 "Unified Cover Test AI: trajectory + eye-crop geometry fusion. "
                 "Research only, not a clinical diagnosis."
@@ -317,7 +321,7 @@ class UnifiedCoverInferenceService:
             "analyzedEventIds": event_ids or [],
             "branchesUsed": [],
             "branchDetails": {"multimodal": branch_a, "hirschberg_geometry": branch_b},
-            "model": {"name": "cover-test-unified", "version": "unified-v1.0.0", "loaded": True},
+            "model": {"name": "cover-test-unified", "version": "unified-v2.0.0", "loaded": True},
             "notice": f"Unified inference inconclusive: {reason}.",
         }
 
@@ -326,9 +330,32 @@ class UnifiedCoverInferenceService:
         trajectories: Dict[int, Dict[str, Any]],
         decoded_events: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Run both branches and fuse results."""
+        """Run both branches and fuse results. Supports trajectory fallback when no uncover images exist."""
         if not decoded_events:
+            # Trajectory fallback via Branch A when no uncover images were captured
+            branch_a = self._run_branch_a(trajectories, {})
+            if branch_a and branch_a.get("prediction") in ("NORMAL", "STRABISMUS"):
+                pred = branch_a["prediction"]
+                conf = branch_a["confidence"]
+                return {
+                    "status": "COMPLETED",
+                    "prediction": pred,
+                    "classProbabilities": branch_a["classProbabilities"],
+                    "confidence": conf,
+                    "isReliable": conf >= 0.65,
+                    "inputModalities": ["time_series"],
+                    "receivedModalities": ["time_series"],
+                    "analyzedEventIds": [],
+                    "branchesUsed": ["multimodal_trajectory_disparity"],
+                    "branchDetails": {"multimodal": branch_a, "hirschberg_geometry": None},
+                    "model": {"name": "cover-test-unified", "version": "unified-v2.0.0-trajectory", "loaded": True},
+                    "notice": (
+                        "Trajectory disparity inference (no uncover images captured). "
+                        "RF_D3 model, LOPO BalAcc~73%, CI=[50%,94%]. Research only, not clinical diagnosis."
+                    ),
+                }
             return self._inconclusive("NO_UNCOVER_EVENTS", [])
+
         branch_a = self._run_branch_a(trajectories, decoded_events)
         branch_b = self._run_branch_b(decoded_events)
         logger.info(
