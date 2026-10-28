@@ -33,20 +33,27 @@ def _bcea(x: np.ndarray, y: np.ndarray) -> float:
     if sx == 0.0 or sy == 0.0:
         return 0.0
     rho = float(np.corrcoef(x, y)[0, 1])
+    if not np.isfinite(rho):
+        return 0.0
     rho = float(np.clip(rho, -1.0 + 1e-9, 1.0 - 1e-9))
-    return float(2.0 * np.pi * (_BCEA_K ** 2) * sx * sy * np.sqrt(1.0 - rho ** 2))
+    diff = max(0.0, 1.0 - rho ** 2)
+    return float(2.0 * np.pi * (_BCEA_K ** 2) * sx * sy * np.sqrt(diff))
 
 
 def _normalize_frame(s: dict) -> dict:
-    t = s.get("t")
-    if t is None and "timestampMs" in s:
-        t = s["timestampMs"] / 1000.0
+    # FE schema 2 provides source milliseconds; legacy Korean t-only files
+    # explicitly use seconds. Magnitude is never a reliable unit detector.
+    t = s["timestampMs"] / 1000.0 if "timestampMs" in s else s.get("t")
+    if t is None or not np.isfinite(float(t)):
+        raise ValueError("Missing/non-finite source timestamp")
     lx = s.get("leftX") if "leftX" in s else (s.get("leftEye", {}) or {}).get("x")
     ly = s.get("leftY") if "leftY" in s else (s.get("leftEye", {}) or {}).get("y")
     rx = s.get("rightX") if "rightX" in s else (s.get("rightEye", {}) or {}).get("x")
     ry = s.get("rightY") if "rightY" in s else (s.get("rightEye", {}) or {}).get("y")
-    l_valid = s.get("leftValid", lx is not None and ly is not None)
-    r_valid = s.get("rightValid", rx is not None and ry is not None)
+    l_valid = s.get("leftValid", (s.get("leftEye") or {}).get("valid", False))
+    r_valid = s.get("rightValid", (s.get("rightEye") or {}).get("valid", False))
+    l_valid = l_valid and all(v is not None and np.isfinite(float(v)) for v in (lx, ly))
+    r_valid = r_valid and all(v is not None and np.isfinite(float(v)) for v in (rx, ry))
     return {
         "t": float(t) if t is not None else 0.0,
         "leftX": float(lx) if lx is not None else 0.0,
@@ -167,99 +174,45 @@ class MultimodalCoverPredictor:
         ]
         return np.asarray(feats, dtype=np.float64)
 
-    def _get_disparity_features(self, cycles: dict) -> np.ndarray:
-        """Extract disparity features from all cycle samples."""
+    def _get_disparity_features(self, cycles: dict) -> tuple[np.ndarray, bool]:
+        """Extract disparity features from all cycle samples. Returns (vec, has_valid_samples)."""
         try:
-            all_frames = []
+            vectors, weights = [], []
             for cycle_idx in sorted(cycles.keys()):
                 cycle = cycles[cycle_idx]
-                all_frames.extend(cycle.get("samples", []))
-            if not all_frames:
-                return np.zeros(len(self.disparity_feature_names), dtype=np.float64)
-            feats = extract_disparity_features(all_frames)
-            if feats is None:
-                return np.zeros(len(self.disparity_feature_names), dtype=np.float64)
-            vec = np.array([feats.get(k, 0.0) for k in self.disparity_feature_names], dtype=np.float64)
-            return np.where(np.isfinite(vec), vec, 0.0)
+                samples = cycle.get("samples", [])
+                feats = extract_disparity_features(samples)
+                if feats is not None:
+                    vectors.append([feats[k] for k in self.disparity_feature_names])
+                    weights.append(len(samples))
+            if not vectors:
+                return np.zeros(len(self.disparity_feature_names), dtype=np.float64), False
+            vec = np.average(np.asarray(vectors, dtype=float), axis=0, weights=weights)
+            return vec, bool(np.all(np.isfinite(vec)))
         except Exception as exc:
             logger.warning("Disparity feat error: %s", exc)
-            return np.zeros(len(self.disparity_feature_names), dtype=np.float64)
+            return np.zeros(len(self.disparity_feature_names), dtype=np.float64), False
 
     def predict_multimodal(self, payload: dict) -> dict:
-        contract = payload.get("contract")
-        if contract != CONTRACT:
-            raise ValueError(f"Contract mismatch: expected {CONTRACT}, got {contract}")
-
-        cycles = payload.get("cycles", {})
-        decoded_events = payload.get("uncoverEvents", {})
-        ids = list(decoded_events.keys())
-
-        # Extract disparity features from trajectory
-        disp_vec = self._get_disparity_features(cycles)
-
-        # Predict using disparity model
+        if payload.get("contract") != CONTRACT:
+            raise ValueError("Contract mismatch")
+        vector, valid = self._get_disparity_features(payload.get("cycles", {}))
+        base = {"prediction": "INCONCLUSIVE", "classProbabilities": None,
+                "confidence": None, "isReliable": False, "inputModalities": [],
+                "analyzedEventIds": [], "accuracy": None}
+        if not valid:
+            return {**base, "notice": "Insufficient valid trajectory; received crops are not consumed by this legacy model."}
         try:
-            disp_proba = self.pipeline.predict_proba(disp_vec.reshape(1, -1))[0]
-            p_norm_disp = float(disp_proba[0])
-            p_strab_disp = float(disp_proba[1])
+            proba = self.pipeline.predict_proba(vector.reshape(1, -1))[0]
+            classes = list(self.pipeline.classes_)
+            norm = float(proba[classes.index(0) if 0 in classes else classes.index("NORMAL")])
+            strab = float(proba[classes.index(1) if 1 in classes else classes.index("STRABISMUS")])
+            if not np.all(np.isfinite([norm, strab])):
+                raise ValueError("Non-finite probabilities")
         except Exception as exc:
-            logger.warning("Pipeline predict_proba error: %s", exc)
-            p_norm_disp = p_strab_disp = 0.5
-
-        # Case 1: Trajectory-only prediction (when no uncover images captured)
-        if not ids:
-            pred = "NORMAL" if p_norm_disp >= p_strab_disp else "STRABISMUS"
-            conf = max(p_norm_disp, p_strab_disp)
-            return {
-                "prediction": pred,
-                "classProbabilities": {
-                    "NORMAL": round(p_norm_disp, 4),
-                    "STRABISMUS": round(p_strab_disp, 4),
-                },
-                "analyzedEventIds": [],
-                "isReliable": conf >= 0.65,
-                "inputModalities": ["time_series"],
-                "notice": (
-                    "Trajectory-only disparity prediction (no uncover images captured). "
-                    "RF_D3 model, BalAcc(LOPO)~73%, CI=[50%,94%]. Research only, not clinical diagnosis."
-                ),
-            }
-
-        # Case 2: Process eye image events
-        probs_list = []
-        for event_id, item in decoded_events.items():
-            images = item.get("images", {})
-            left_img = images.get("left")
-            right_img = images.get("right")
-            if left_img is None or right_img is None:
-                continue
-
-            # Fallback to disparity probability per event
-            probs_list.append([p_norm_disp, p_strab_disp])
-
-        if not probs_list:
-            pred = "NORMAL" if p_norm_disp >= p_strab_disp else "STRABISMUS"
-            conf = max(p_norm_disp, p_strab_disp)
-            return {
-                "prediction": pred,
-                "classProbabilities": {"NORMAL": round(p_norm_disp, 4), "STRABISMUS": round(p_strab_disp, 4)},
-                "analyzedEventIds": [],
-                "isReliable": conf >= 0.65,
-                "inputModalities": ["time_series"],
-                "notice": "No usable eye images; predicted from trajectory disparity features.",
-            }
-
-        pred = "NORMAL" if p_norm_disp >= p_strab_disp else "STRABISMUS"
-        conf = max(p_norm_disp, p_strab_disp)
-
-        return {
-            "prediction": pred,
-            "classProbabilities": {"NORMAL": round(p_norm_disp, 4), "STRABISMUS": round(p_strab_disp, 4)},
-            "analyzedEventIds": ids,
-            "isReliable": conf >= 0.65,
-            "inputModalities": ["time_series", "uncover_eye_images"],
-            "notice": (
-                "Multimodal Cover Test prediction: trajectory disparity + uncover eye images. "
-                "Research only, not clinical diagnosis."
-            ),
-        }
+            logger.warning("Trajectory inference failed: %s", exc)
+            return {**base, "notice": "Trajectory model failed."}
+        return {**base, "prediction": "NORMAL" if norm >= strab else "STRABISMUS",
+                "classProbabilities": {"NORMAL": norm, "STRABISMUS": strab},
+                "confidence": max(norm, strab), "inputModalities": ["time_series"],
+                "notice": "Trajectory-only research prediction. Eye pixels are not consumed by this artifact; no validated crop accuracy."}

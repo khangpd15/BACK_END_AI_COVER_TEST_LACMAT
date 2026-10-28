@@ -1,12 +1,14 @@
 """Unified AI inference service for Cover Test.
 
 Combines two complementary branches:
-  Branch A - Cover Test Multimodal (trajectory features + raw pixel features)
+  Branch A - Legacy Cover Test trajectory features (does NOT consume image pixels)
               using cover_multimodal_model.joblib / MultimodalCoverPredictor
   Branch B - Hirschberg v0.6 geometry branch (OpenCV eye-crop geometry -> 35-dim
               sklearn pipeline) using hirschberg_v06_ensemble.joblib branch_v02_pipeline
 
-Fusion: weighted confidence vote. Falls back to whichever single branch succeeds.
+Legacy fusion remains research-only. V3 adds strict source timing/crop gates,
+an actual trained pixel-transfer research branch and an optional paired model
+whose clinical promotion requires independently held-out paired data.
 
 Class mapping (Hirschberg -> Cover Test):
   esotropia  -> STRABISMUS
@@ -17,12 +19,19 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import sys
 import joblib
 import numpy as np
+
+# Ensure project root is in sys.path for joblib unpickling
+_ROOT_STR = str(Path(__file__).resolve().parents[3])
+if _ROOT_STR not in sys.path:
+    sys.path.insert(0, _ROOT_STR)
 
 logger = logging.getLogger("remicare.unified_inference")
 
@@ -125,6 +134,27 @@ class UnifiedCoverInferenceService:
         self._load_errors: Dict[str, str] = {}
         self._load_multimodal(multimodal_path or _MULTIMODAL_PATH)
         self._load_hirschberg(hirschberg_path or _HIRSCHBERG_PATH)
+        self._paired_artifact = None
+        self._image_transfer = None
+        transfer_path = Path(os.getenv("COVER_IMAGE_TRANSFER_MODEL_PATH", str(_PROJECT_ROOT / "models" / "cover_image_transfer_candidate.joblib")))
+        if transfer_path.is_file():
+            try:
+                transfer = joblib.load(transfer_path)
+                if transfer.get("contract") != "hirschberg-paired-pixel-transfer-research-v1" or transfer.get("featureVersion") != "hog64x32-rgb-source-rois-v1":
+                    raise ValueError("Image transfer contract mismatch")
+                self._image_transfer = transfer
+            except Exception as exc:
+                self._load_errors["image_transfer"] = str(exc)
+        paired_path = os.getenv("COVER_PAIRED_MODEL_PATH")
+        if paired_path:
+            try:
+                from .paired_crop_model import CONTRACT, FEATURE_VERSION, PairedCropPredictor
+                artifact = joblib.load(paired_path)
+                if artifact.get("pairedContract") != CONTRACT or artifact.get("featureVersion") != FEATURE_VERSION or not isinstance(artifact.get("model"), PairedCropPredictor):
+                    raise ValueError("Paired artifact contract mismatch")
+                self._paired_artifact = artifact
+            except Exception as exc:
+                self._load_errors["paired"] = str(exc)
 
     def _load_multimodal(self, path: Path) -> None:
         try:
@@ -160,7 +190,13 @@ class UnifiedCoverInferenceService:
     def health(self) -> Dict[str, Any]:
         return {
             "loaded": self._multimodal_artifact is not None or self._hirschberg_branch_pipeline is not None,
-            "version": "unified-v2.0.0",
+            "version": "unified-v2.1.0",
+            "paired_crop": {"loaded": self._paired_artifact is not None,
+                            "configured": bool(os.getenv("COVER_PAIRED_MODEL_PATH")),
+                            "validation": (self._paired_artifact or {}).get("validation"),
+                            "error": self._load_errors.get("paired")},
+            "image_transfer": {"loaded": self._image_transfer is not None,
+                               "researchOnly": True, "error": self._load_errors.get("image_transfer")},
             "multimodal": {
                 "loaded": self._multimodal_artifact is not None,
                 "version": (self._multimodal_artifact or {}).get("version"),
@@ -285,9 +321,12 @@ class UnifiedCoverInferenceService:
         fused = {k: round(v, 4) for k, v in fused.items()}
         pred = "NORMAL" if fused["NORMAL"] >= fused["STRABISMUS"] else "STRABISMUS"
         conf = round(fused[pred], 4)
-        is_reliable = conf >= 0.60 and len(active) == 2
+        is_reliable = False  # legacy fusion has no independent paired-crop validation
 
-        all_analyzed = list(decoded_events.keys())
+        all_analyzed = sorted({event for _, branch in active for event in branch.get("analyzedEventIds", [])})
+        modalities = sorted({modality for _, branch in active for modality in branch.get("inputModalities", [])})
+        if branch_b:
+            modalities = sorted(set(modalities) | {"uncover_eye_images"})
 
         return {
             "status": "COMPLETED",
@@ -295,12 +334,12 @@ class UnifiedCoverInferenceService:
             "classProbabilities": fused,
             "confidence": conf,
             "isReliable": is_reliable,
-            "inputModalities": ["time_series", "uncover_eye_images"],
+            "inputModalities": modalities,
             "receivedModalities": ["time_series", "uncover_eye_images"],
             "analyzedEventIds": all_analyzed,
             "branchesUsed": [br["branch"] for _, br in active],
             "branchDetails": {"multimodal": branch_a, "hirschberg_geometry": branch_b},
-            "model": {"name": "cover-test-unified", "version": "unified-v2.0.0", "loaded": True},
+            "model": {"name": "cover-test-unified", "version": "unified-v2.1.0", "loaded": True},
             "notice": (
                 "Unified Cover Test AI: trajectory + eye-crop geometry fusion. "
                 "Research only, not a clinical diagnosis."
@@ -316,22 +355,24 @@ class UnifiedCoverInferenceService:
             "status": "INCONCLUSIVE", "prediction": "INCONCLUSIVE",
             "reason": reason, "classProbabilities": None, "confidence": None,
             "isReliable": False,
-            "inputModalities": ["time_series", "uncover_eye_images"],
+            "inputModalities": [],
             "receivedModalities": ["time_series", "uncover_eye_images"],
-            "analyzedEventIds": event_ids or [],
+            "analyzedEventIds": [], "receivedEventIds": event_ids or [],
             "branchesUsed": [],
             "branchDetails": {"multimodal": branch_a, "hirschberg_geometry": branch_b},
-            "model": {"name": "cover-test-unified", "version": "unified-v2.0.0", "loaded": True},
+            "model": {"name": "cover-test-unified", "version": "unified-v2.1.0", "loaded": True},
             "notice": f"Unified inference inconclusive: {reason}.",
         }
 
-    def predict(
+    def _predict_legacy(
         self,
         trajectories: Dict[int, Dict[str, Any]],
         decoded_events: Dict[str, Any],
     ) -> Dict[str, Any]:
         """Run both branches and fuse results. Supports trajectory fallback when no uncover images exist."""
         if not decoded_events:
+            if not trajectories or not any(c.get("samples") for c in trajectories.values()):
+                return self._inconclusive("NO_TRAJECTORY_DATA", [])
             # Trajectory fallback via Branch A when no uncover images were captured
             branch_a = self._run_branch_a(trajectories, {})
             if branch_a and branch_a.get("prediction") in ("NORMAL", "STRABISMUS"):
@@ -342,13 +383,13 @@ class UnifiedCoverInferenceService:
                     "prediction": pred,
                     "classProbabilities": branch_a["classProbabilities"],
                     "confidence": conf,
-                    "isReliable": conf >= 0.65,
+                    "isReliable": False,
                     "inputModalities": ["time_series"],
                     "receivedModalities": ["time_series"],
                     "analyzedEventIds": [],
                     "branchesUsed": ["multimodal_trajectory_disparity"],
                     "branchDetails": {"multimodal": branch_a, "hirschberg_geometry": None},
-                    "model": {"name": "cover-test-unified", "version": "unified-v2.0.0-trajectory", "loaded": True},
+                    "model": {"name": "cover-test-unified", "version": "unified-v2.1.0-trajectory", "loaded": True},
                     "notice": (
                         "Trajectory disparity inference (no uncover images captured). "
                         "RF_D3 model, LOPO BalAcc~73%, CI=[50%,94%]. Research only, not clinical diagnosis."
@@ -366,6 +407,64 @@ class UnifiedCoverInferenceService:
             branch_b["confidence"] if branch_b else 0.0,
         )
         return self._fuse(branch_a, branch_b, decoded_events)
+
+    def predict(self, trajectories, decoded_events):
+        from .paired_crop_model import assess_timing, validate_source_event
+        quality, rejected = {}, {}
+        for key, cycle in trajectories.items():
+            try:
+                quality[str(key)] = assess_timing(cycle.get("samples", []))
+            except (ValueError, TypeError) as exc:
+                quality[str(key)] = {"eligible30fps": False, "reason": str(exc)}
+        for event_id, item in decoded_events.items():
+            try:
+                event = item["event"]
+                cycle = trajectories.get(event["cycle"], trajectories.get(str(event["cycle"]), {}))
+                validate_source_event(event, cycle.get("samples", []))
+                if not quality.get(str(event["cycle"]), {}).get("eligible30fps"):
+                    raise ValueError("PROCESSED_CADENCE_BELOW_30FPS_POLICY")
+            except (ValueError, KeyError, TypeError) as exc:
+                rejected[event_id] = str(exc)
+        suitable = bool(quality) and all(q["eligible30fps"] for q in quality.values())
+        if rejected or (trajectories and not suitable):
+            result = self._inconclusive("CROP_OR_TIMESTAMP_QUALITY_FAILED", list(decoded_events))
+            result["rejectedEvents"] = rejected
+        elif os.getenv("COVER_PAIRED_MODEL_PATH"):
+            if self._paired_artifact is None:
+                result = self._inconclusive("PAIRED_MODEL_LOAD_FAILED", list(decoded_events))
+            else:
+                result = self._paired_artifact["model"].predict_multimodal({
+                    "contract": "cover-uncover-multimodal-v1", "cycles": trajectories,
+                    "uncoverEvents": decoded_events})
+                result["status"] = "INCONCLUSIVE" if result["prediction"] == "INCONCLUSIVE" else "COMPLETED"
+                result["model"] = {"name": "cover-paired-crops", "version": self._paired_artifact["version"], "loaded": True}
+        else:
+            result = self._predict_legacy(trajectories, decoded_events)
+            result["accuracy"] = None
+            result["validationStatus"] = "NO_INDEPENDENT_PAIRED_CROP_VALIDATION"
+        if decoded_events and not rejected and suitable and self._image_transfer is not None:
+            from .paired_crop_model import crop_features
+            evidence, failures = {}, {}
+            for event_id, item in decoded_events.items():
+                try:
+                    vector = np.r_[crop_features(item["images"]["left"]), crop_features(item["images"]["right"])]
+                    pipeline = self._image_transfer["pipeline"]
+                    proba = pipeline.predict_proba(vector.reshape(1, -1))[0]
+                    classes = list(pipeline.classes_)
+                    evidence[event_id] = {"NORMAL": float(proba[classes.index(0)]),
+                                          "STRABISMUS": float(proba[classes.index(1)])}
+                except (ValueError, TypeError, KeyError) as exc:
+                    failures[event_id] = str(exc)
+            result["imageTransferResearch"] = {
+                "status": "RESEARCH_ONLY", "eventProbabilities": evidence,
+                "analyzedEventIds": list(evidence), "rejectedEvents": failures,
+                "sourceEvaluation": self._image_transfer["validation"].get("evaluation"),
+                "coverTestAccuracy": None, "promoted": False,
+                "notice": "Static Hirschberg transfer scores. Source identity QC pending; not used to claim validated Cover Test accuracy or to change fusion weights."}
+        result.setdefault("accuracy", None)
+        result["timingQuality"] = quality
+        result["deviceSuitable30fps"] = suitable
+        return result
 
 
 @lru_cache(maxsize=1)
